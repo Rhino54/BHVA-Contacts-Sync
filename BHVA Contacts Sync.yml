@@ -11,15 +11,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Fully register PSGallery
+      - name: Install Microsoft Graph (NuGet fallback)
         run: |
-          Unregister-PSRepository -Name "PSGallery" -ErrorAction SilentlyContinue
-          Register-PSRepository -Default
-          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
-        shell: pwsh
-
-      - name: Install Graph module
-        run: Install-Module Microsoft.Graph -Scope CurrentUser -Force
+          Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
+          Import-Package -Name Microsoft.Graph
         shell: pwsh
 
       - name: Run sync script (DryRun)
