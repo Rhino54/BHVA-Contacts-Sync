@@ -1,29 +1,22 @@
-name: BHVA Contact Sync
+name: BHVA Contacts Sync
 
 on:
-  schedule:
-    - cron: "0 5 * * *"  # 5 AM UTC daily
   workflow_dispatch:
 
 jobs:
-  sync-contacts:
+  run-sync:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Install PowerShell Graph modules
-        run: |
-          Install-Module Microsoft.Graph -Scope CurrentUser -Force
-          Install-Module Microsoft.Graph.Users -Scope CurrentUser -Force
-          Install-Module Microsoft.Graph.Contacts -Scope CurrentUser -Force
+    - name: Install Microsoft Graph (NuGet fallback)
+      shell: pwsh
+      run: |
+        Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
+        Import-Module Microsoft.Graph -Force
 
-      - name: Run BHVA contact sync
-        env:
-          TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
-          CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
-        run: |
-          pwsh -File .\bhva-contact-sync.ps1 `
-            -DryRun:$false
+    - name: Run BHVA Contacts Sync script
+      shell: pwsh
+      run: pwsh "./BHVA Contacts Sync.ps1"
