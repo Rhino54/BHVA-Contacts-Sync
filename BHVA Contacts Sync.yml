@@ -4,18 +4,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  run-sync:
+  sync-contacts:
     runs-on: windows-latest
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Register PSGallery
+        run: |
+          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+        shell: pwsh
 
       - name: Install Graph module
         run: Install-Module Microsoft.Graph -Scope CurrentUser -Force
         shell: pwsh
 
-      - name: Run sync script
-        run: pwsh ./BHVA Contacts Sync.ps1 -DryRun:$true
+      - name: Run sync script (DryRun)
+        run: pwsh "./BHVA Contacts Sync.ps1" -DryRun:$true
         env:
           GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
           GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
