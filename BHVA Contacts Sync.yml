@@ -11,8 +11,10 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Register PSGallery
+      - name: Fully register PSGallery
         run: |
+          Unregister-PSRepository -Name "PSGallery" -ErrorAction SilentlyContinue
+          Register-PSRepository -Default
           Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
         shell: pwsh
 
