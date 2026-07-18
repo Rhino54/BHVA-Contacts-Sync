@@ -11,10 +11,18 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    - name: Cache Microsoft Graph module
+      uses: actions/cache@v4
+      with:
+        path: C:\Users\runneradmin\AppData\Local\PackageManagement\NuGet\Packages
+        key: graph-cache
+
     - name: Install Microsoft Graph (NuGet fallback)
       shell: pwsh
       run: |
-        Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
+        if (-not (Test-Path "C:\Users\runneradmin\AppData\Local\PackageManagement\NuGet\Packages\Microsoft.Graph")) {
+            Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
+        }
         Import-Module Microsoft.Graph -Force
 
     - name: Run BHVA Contacts Sync script
