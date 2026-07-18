@@ -12,32 +12,24 @@ jobs:
       uses: actions/checkout@v4
 
     # ============================
-    # Cache Microsoft Graph module
+    # Cache Microsoft Graph PowerShell module
     # ============================
     - name: Cache Microsoft Graph module
       uses: actions/cache@v4
       with:
         path: |
           ~/.local/share/powershell/Modules
-          ~/.local/share/PackageManagement/NuGet/Packages
         key: graph-cache
 
     # ============================
-    # Install Microsoft Graph (only if cache is empty)
+    # Install Microsoft Graph PowerShell module (fast)
     # ============================
-    - name: Install Microsoft Graph (NuGet fallback)
+    - name: Install Microsoft Graph PowerShell module
       shell: pwsh
       run: |
-        # Create directories if missing
-        mkdir -p ~/.local/share/powershell/Modules
-        mkdir -p ~/.local/share/PackageManagement/NuGet/Packages
-
-        # Check if Graph is already cached
-        if (-not (Test-Path "~/.local/share/PackageManagement/NuGet/Packages/Microsoft.Graph")) {
-            Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
+        if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
+            Install-Module Microsoft.Graph -Force -Scope CurrentUser
         }
-
-        Import-Module Microsoft.Graph -Force
 
     # ============================
     # Run your sync script
