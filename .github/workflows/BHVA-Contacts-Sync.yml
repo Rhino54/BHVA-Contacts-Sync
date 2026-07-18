@@ -27,7 +27,7 @@ jobs:
       shell: pwsh
       run: |
         if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
-            Install-Module Microsoft.Graph -Force -Scope CurrentUser
+            Install-Module Microsoft.Graph -Force -Scope CurrentUser -AllowClobber -RequiredVersion 2.0.0
         }
 
     # ============================
