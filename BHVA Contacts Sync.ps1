@@ -479,9 +479,9 @@ if ($DryRun) {
 # 8. Local save on Hotpi (Windows)
 # =========================
 
-$IsWindows = $PSVersionTable.OS -match "Windows"
+$RunningOnWindows = $PSVersionTable.OS -match "Windows"
 
-if ($IsWindows) {
+if ($RunningOnWindows) {
     $localDir = "C:\Users\hotpi\Documents\BHVA Not Shared\BHVA Sync Logs"
     if (-not (Test-Path $localDir)) {
         New-Item -ItemType Directory -Path $localDir | Out-Null
