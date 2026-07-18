@@ -17,23 +17,29 @@ $BhvUser2        = "bod.bhva@bristolharbourvillage.org"
 $BhvaCategory    = "BHVA"
 
 # =========================
-# Connect to Graph
+# REST auth – get app-only token
 # =========================
 
-# Ensure Microsoft.Graph PowerShell module is installed (Ubuntu runners need this)
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
-    Install-Module Microsoft.Graph -Force -Scope CurrentUser
+function Get-GraphToken {
+    param(
+        [string]$TenantId,
+        [string]$ClientId,
+        [string]$ClientSecret
+    )
+
+    $body = @{
+        client_id     = $ClientId
+        client_secret = $ClientSecret
+        scope         = "https://graph.microsoft.com/.default"
+        grant_type    = "client_credentials"
+    }
+
+    $response = Invoke-RestMethod -Method POST -Uri "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token" -Body $body
+    return $response.access_token
 }
 
-Import-Module Microsoft.Graph -Force
-
-$SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
-$Cred = New-Object System.Management.Automation.PSCredential($ClientId, $SecureSecret)
-
-Connect-MgGraph `
-    -TenantId $TenantId `
-    -Credential $Cred `
-    -Scopes "Contacts.ReadWrite", "User.Read.All"
+$AccessToken = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
+$AuthHeader  = @{ Authorization = "Bearer $AccessToken" }
 
 # =========================
 # Helpers
@@ -78,13 +84,14 @@ function Get-ContactsForUser {
     param([string]$UserId)
 
     $contacts = @()
-    $page = Get-MgUserContact -UserId $UserId -PageSize 100
+    $uri = "https://graph.microsoft.com/v1.0/users/$UserId/contacts`?$top=100"
 
-    $contacts += $page
-
-    while ($null -ne $page.NextLink) {
-        $page = Invoke-MgGraphRequest -Method GET -Uri $page.NextLink
-        $contacts += $page.value
+    while ($uri) {
+        $page = Invoke-RestMethod -Method GET -Uri $uri -Headers $AuthHeader
+        if ($page.value) {
+            $contacts += $page.value
+        }
+        $uri = $page.'@odata.nextLink'
     }
 
     return $contacts
@@ -154,8 +161,21 @@ function Merge-Contacts {
         } -Descending | Select-Object -First 1
     }
 
-    $merged = $base.PSObject.Copy()
+    # Start with a shallow copy
+    $merged = [ordered]@{
+        id             = $base.id
+        displayName    = $base.displayName
+        companyName    = $base.companyName
+        jobTitle       = $base.jobTitle
+        mobilePhone    = $base.mobilePhone
+        businessPhones = $base.businessPhones
+        homePhones     = $base.homePhones
+        categories     = $base.categories
+        body           = $base.body
+        emailAddresses = $base.emailAddresses
+    }
 
+    # Emails
     $allEmails = @()
     foreach ($c in $Contacts) {
         if ($c.emailAddresses) {
@@ -163,13 +183,11 @@ function Merge-Contacts {
         }
     }
     $allEmails = $allEmails | Where-Object { $_ } | Select-Object -Unique
-
     $merged.emailAddresses = $allEmails | ForEach-Object {
-        [Microsoft.Graph.PowerShell.Models.MicrosoftGraphEmailAddress]@{
-            address = $_
-        }
+        @{ address = $_ }
     }
 
+    # Phones
     $allPhones = @()
     foreach ($c in $Contacts) {
         if ($c.mobilePhone)      { $allPhones += $c.mobilePhone }
@@ -184,26 +202,38 @@ function Merge-Contacts {
         Select-Object -Unique
 
     if ($normalized.Count -gt 0) {
-        $merged.mobilePhone   = $normalized[0]
-        $merged.businessPhones = $normalized[1..($normalized.Count-1)]
+        $merged.mobilePhone    = $normalized[0]
+        if ($normalized.Count -gt 1) {
+            $merged.businessPhones = $normalized[1..($normalized.Count-1)]
+        } else {
+            $merged.businessPhones = @()
+        }
     }
 
+    # Notes summary (not full text)
     $allBodies = $Contacts | Where-Object { $_.body -and $_.body.content } |
         ForEach-Object { $_.body.content }
 
     if ($allBodies.Count -gt 0) {
         $merged.body = @{
             contentType = "Text"
-            content     = ($allBodies -join "`n--- BHV notes ---`n")
+            content     = "Merged notes from $($allBodies.Count) source contact(s)."
         }
     }
 
+    # Categories
     $cats = @()
     foreach ($c in $Contacts) {
         if ($c.categories) { $cats += $c.categories }
     }
     $cats += $BhvaCategory
     $merged.categories = $cats | Select-Object -Unique
+
+    # Source summary for logging
+    $merged.SourceSummary = @{
+        Count     = $Contacts.Count
+        Mailboxes = ($Contacts | ForEach-Object { $_.parentFolderId }) -join ";"
+    }
 
     return $merged
 }
@@ -212,6 +242,43 @@ $mergedBhvaContacts = @()
 
 foreach ($entry in $unifiedBhva.GetEnumerator()) {
     $mergedBhvaContacts += Merge-Contacts -Contacts $entry.Value.SourceContacts
+}
+
+# =========================
+# REST helpers for write operations
+# =========================
+
+function New-GraphContact {
+    param(
+        [string]$UserId,
+        [hashtable]$Contact
+    )
+
+    $uri = "https://graph.microsoft.com/v1.0/users/$UserId/contacts"
+    $body = $Contact | ConvertTo-Json -Depth 6
+    Invoke-RestMethod -Method POST -Uri $uri -Headers $AuthHeader -Body $body -ContentType "application/json"
+}
+
+function Update-GraphContact {
+    param(
+        [string]$UserId,
+        [string]$ContactId,
+        [hashtable]$Contact
+    )
+
+    $uri = "https://graph.microsoft.com/v1.0/users/$UserId/contacts/$ContactId"
+    $body = $Contact | ConvertTo-Json -Depth 6
+    Invoke-RestMethod -Method PATCH -Uri $uri -Headers $AuthHeader -Body $body -ContentType "application/json"
+}
+
+function Remove-GraphContact {
+    param(
+        [string]$UserId,
+        [string]$ContactId
+    )
+
+    $uri = "https://graph.microsoft.com/v1.0/users/$UserId/contacts/$ContactId"
+    Invoke-RestMethod -Method DELETE -Uri $uri -Headers $AuthHeader
 }
 
 # =========================
@@ -239,29 +306,45 @@ foreach ($m in $mergedBhvaContacts) {
     }
     $key = Build-MatchKey -DisplayName $m.displayName -Emails $emails
 
+    $phones = @()
+    if ($m.mobilePhone)      { $phones += $m.mobilePhone }
+    if ($m.businessPhones)   { $phones += $m.businessPhones }
+
     if ($hotmailIndex.ContainsKey($key)) {
         $existing = $hotmailIndex[$key]
 
         $changes += [ordered]@{
-            Action   = "UpdateHotmail"
-            Key      = $key
-            Name     = $m.displayName
-            Emails   = ($emails -join ", ")
+            Action        = "UpdateHotmail"
+            Mailbox       = $HotmailUser
+            Key           = $key
+            Name          = $m.displayName
+            Emails        = ($emails -join ", ")
+            Phones        = ($phones -join ", ")
+            Categories    = ($m.categories -join ", ")
+            NotesSummary  = $m.body.content
+            SourceCount   = $m.SourceSummary.Count
+            SourceMailboxes = $m.SourceSummary.Mailboxes
         }
 
         if (-not $DryRun) {
-            Update-MgUserContact -UserId $HotmailUser -ContactId $existing.Id -BodyParameter $m
+            Update-GraphContact -UserId $HotmailUser -ContactId $existing.id -Contact $m
         }
     } else {
         $changes += [ordered]@{
-            Action   = "CreateHotmail"
-            Key      = $key
-            Name     = $m.displayName
-            Emails   = ($emails -join ", ")
+            Action        = "CreateHotmail"
+            Mailbox       = $HotmailUser
+            Key           = $key
+            Name          = $m.displayName
+            Emails        = ($emails -join ", ")
+            Phones        = ($phones -join ", ")
+            Categories    = ($m.categories -join ", ")
+            NotesSummary  = $m.body.content
+            SourceCount   = $m.SourceSummary.Count
+            SourceMailboxes = $m.SourceSummary.Mailboxes
         }
 
         if (-not $DryRun) {
-            New-MgUserContact -UserId $HotmailUser -BodyParameter $m
+            New-GraphContact -UserId $HotmailUser -Contact $m
         }
     }
 }
@@ -296,31 +379,45 @@ function Sync-ToBhv {
         }
         $key = Build-MatchKey -DisplayName $m.displayName -Emails $emails
 
+        $phones = @()
+        if ($m.mobilePhone)      { $phones += $m.mobilePhone }
+        if ($m.businessPhones)   { $phones += $m.businessPhones }
+
         if ($index.ContainsKey($key)) {
             $existing = $index[$key]
 
             $changes += [ordered]@{
-                Action   = "UpdateBhv"
-                Mailbox  = $UserId
-                Key      = $key
-                Name     = $m.displayName
-                Emails   = ($emails -join ", ")
+                Action        = "UpdateBhv"
+                Mailbox       = $UserId
+                Key           = $key
+                Name          = $m.displayName
+                Emails        = ($emails -join ", ")
+                Phones        = ($phones -join ", ")
+                Categories    = ($m.categories -join ", ")
+                NotesSummary  = $m.body.content
+                SourceCount   = $m.SourceSummary.Count
+                SourceMailboxes = $m.SourceSummary.Mailboxes
             }
 
             if (-not $DryRun) {
-                Update-MgUserContact -UserId $UserId -ContactId $existing.Id -BodyParameter $m
+                Update-GraphContact -UserId $UserId -ContactId $existing.id -Contact $m
             }
         } else {
             $changes += [ordered]@{
-                Action   = "CreateBhv"
-                Mailbox  = $UserId
-                Key      = $key
-                Name     = $m.displayName
-                Emails   = ($emails -join ", ")
+                Action        = "CreateBhv"
+                Mailbox       = $UserId
+                Key           = $key
+                Name          = $m.displayName
+                Emails        = ($emails -join ", ")
+                Phones        = ($phones -join ", ")
+                Categories    = ($m.categories -join ", ")
+                NotesSummary  = $m.body.content
+                SourceCount   = $m.SourceSummary.Count
+                SourceMailboxes = $m.SourceSummary.Mailboxes
             }
 
             if (-not $DryRun) {
-                New-MgUserContact -UserId $UserId -BodyParameter $m
+                New-GraphContact -UserId $UserId -Contact $m
             }
         }
     }
@@ -342,14 +439,20 @@ function Sync-ToBhv {
 
         if (-not $existsInUnified) {
             $changes += [ordered]@{
-                Action   = "DeleteBhv"
-                Mailbox  = $UserId
-                Key      = $key
-                Name     = $c.displayName
+                Action        = "DeleteBhv"
+                Mailbox       = $UserId
+                Key           = $key
+                Name          = $c.displayName
+                Emails        = ($emails -join ", ")
+                Phones        = ($c.mobilePhone, ($c.businessPhones -join ";")) -join ", "
+                Categories    = ($c.categories -join ", ")
+                NotesSummary  = $c.body.content
+                SourceCount   = 1
+                SourceMailboxes = $c.parentFolderId
             }
 
             if (-not $DryRun) {
-                Remove-MgUserContact -UserId $UserId -ContactId $c.Id -Confirm:$false
+                Remove-GraphContact -UserId $UserId -ContactId $c.id
             }
         }
     }
@@ -370,4 +473,22 @@ $changes | Export-Csv -Path $logPath -NoTypeInformation
 Write-Host "Sync complete. Changes logged to $logPath"
 if ($DryRun) {
     Write-Host "Dry run mode: no changes were written."
+}
+
+# =========================
+# 8. Local save on Hotpi (Windows)
+# =========================
+
+$IsWindows = $PSVersionTable.OS -match "Windows"
+
+if ($IsWindows) {
+    $localDir = "C:\Users\hotpi\Documents\BHVA Not Shared\BHVA Sync Logs"
+    if (-not (Test-Path $localDir)) {
+        New-Item -ItemType Directory -Path $localDir | Out-Null
+    }
+
+    $localPath = Join-Path $localDir (Split-Path $logPath -Leaf)
+    Copy-Item $logPath $localPath -Force
+
+    Write-Host "Local log copy saved to $localPath"
 }
