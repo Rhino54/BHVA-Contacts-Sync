@@ -372,3 +372,4 @@ $changes | Export-Csv -Path $logPath -NoTypeInformation
 Write-Host "Sync complete. Changes logged to $logPath"
 if ($DryRun) {
     Write-Host "Dry run mode: no changes were written."
+}
