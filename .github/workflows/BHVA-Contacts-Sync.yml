@@ -20,3 +20,7 @@ jobs:
     - name: Run BHVA Contacts Sync script
       shell: pwsh
       run: pwsh "./BHVA Contacts Sync.ps1"
+      env:
+        GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+        GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+        GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
