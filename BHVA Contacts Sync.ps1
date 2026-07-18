@@ -20,7 +20,7 @@ $BhvaCategory    = "BHVA"
 # Connect to Graph
 # =========================
 
-# Ensure module is installed on Ubuntu runners
+# Ensure Microsoft.Graph PowerShell module is installed (Ubuntu runners need this)
 if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
     Install-Module Microsoft.Graph -Force -Scope CurrentUser
 }
