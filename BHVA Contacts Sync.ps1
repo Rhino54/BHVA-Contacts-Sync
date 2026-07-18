@@ -27,10 +27,12 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
 
 Import-Module Microsoft.Graph -Force
 
+$SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+$Cred = New-Object System.Management.Automation.PSCredential($ClientId, $SecureSecret)
+
 Connect-MgGraph `
     -TenantId $TenantId `
-    -ClientId $ClientId `
-    -ClientSecret $ClientSecret `
+    -Credential $Cred `
     -Scopes "Contacts.ReadWrite", "User.Read.All"
 
 # =========================
