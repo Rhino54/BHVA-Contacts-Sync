@@ -20,13 +20,19 @@ $BhvaCategory    = "BHVA"
 # Connect to Graph
 # =========================
 
-Import-Module Microsoft.Graph.Users
-Import-Module Microsoft.Graph.Contacts
+Import-Module Microsoft.Graph -Force
 
 $SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
-$Cred         = New-Object System.Management.Automation.PSCredential($ClientId, $SecureSecret)
 
-Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $Cred -Scopes "Contacts.ReadWrite"
+# Correct Kiota credential object
+$Cred = New-Object Microsoft.Graph.PowerShell.Models.MicrosoftGraphClientSecretCredential(
+    $TenantId,
+    $ClientId,
+    $SecureSecret
+)
+
+# Correct authentication call
+Connect-MgGraph -ClientSecretCredential $Cred -Scopes "Contacts.ReadWrite", "User.Read.All"
 
 # =========================
 # Helpers
@@ -37,22 +43,17 @@ function Normalize-Phone {
 
     if (-not $Number) { return $null }
 
-    # Strip non-digits
     $digits = ($Number -replace '[^\d]', '')
-
     if (-not $digits) { return $null }
 
-    # Assume US if 10 digits
     if ($digits.Length -eq 10) {
         return "+1$digits"
     }
 
-    # If already has country code
     if ($digits.StartsWith("1") -and $digits.Length -eq 11) {
         return "+$digits"
     }
 
-    # Fallback: just prefix +
     return "+$digits"
 }
 
@@ -113,7 +114,7 @@ $allBhvContacts += $bhv1Contacts
 $allBhvContacts += $bhv2Contacts
 
 # =========================
-# 4. Build unified BHVA set (quality-first union)
+# 4. Build unified BHVA set
 # =========================
 
 $unifiedBhva = @{}
@@ -141,13 +142,11 @@ foreach ($c in $sourceContacts) {
 function Merge-Contacts {
     param([object[]]$Contacts)
 
-    # Quality-first: prefer Hotmail contact if present, else richest
     $hotmail = $Contacts | Where-Object { $_.parentFolderId -like "*$HotmailUser*" }
     if ($hotmail.Count -gt 0) {
         $base = $hotmail[0]
     } else {
         $base = $Contacts | Sort-Object {
-            # crude richness metric: count non-null fields
             ($_.displayName, $_.companyName, $_.jobTitle, $_.mobilePhone, $_.businessPhones, $_.homePhones, $_.emailAddresses) |
                 Where-Object { $_ } |
                 Measure-Object
@@ -156,7 +155,6 @@ function Merge-Contacts {
 
     $merged = $base.PSObject.Copy()
 
-    # Merge emails
     $allEmails = @()
     foreach ($c in $Contacts) {
         if ($c.emailAddresses) {
@@ -171,9 +169,7 @@ function Merge-Contacts {
         }
     }
 
-    # Merge phones (normalized)
     $allPhones = @()
-
     foreach ($c in $Contacts) {
         if ($c.mobilePhone)      { $allPhones += $c.mobilePhone }
         if ($c.businessPhones)   { $allPhones += $c.businessPhones }
@@ -186,13 +182,11 @@ function Merge-Contacts {
         Where-Object { $_ } |
         Select-Object -Unique
 
-    # Simple mapping: first mobile, rest business
     if ($normalized.Count -gt 0) {
         $merged.mobilePhone   = $normalized[0]
         $merged.businessPhones = $normalized[1..($normalized.Count-1)]
     }
 
-    # Merge notes (append BHV notes to Hotmail notes)
     $allBodies = $Contacts | Where-Object { $_.body -and $_.body.content } |
         ForEach-Object { $_.body.content }
 
@@ -203,7 +197,6 @@ function Merge-Contacts {
         }
     }
 
-    # Ensure BHVA category
     $cats = @()
     foreach ($c in $Contacts) {
         if ($c.categories) { $cats += $c.categories }
@@ -221,10 +214,9 @@ foreach ($entry in $unifiedBhva.GetEnumerator()) {
 }
 
 # =========================
-# 5. Apply to Hotmail (master)
+# 5. Apply to Hotmail
 # =========================
 
-# Index existing Hotmail contacts by match key
 $hotmailIndex = @{}
 foreach ($c in $hotmailContacts) {
     $emails = @()
@@ -247,7 +239,6 @@ foreach ($m in $mergedBhvaContacts) {
     $key = Build-MatchKey -DisplayName $m.displayName -Emails $emails
 
     if ($hotmailIndex.ContainsKey($key)) {
-        # Update existing
         $existing = $hotmailIndex[$key]
 
         $changes += [ordered]@{
@@ -261,7 +252,6 @@ foreach ($m in $mergedBhvaContacts) {
             Update-MgUserContact -UserId $HotmailUser -ContactId $existing.Id -BodyParameter $m
         }
     } else {
-        # Create new BHVA contact in Hotmail
         $changes += [ordered]@{
             Action   = "CreateHotmail"
             Key      = $key
@@ -276,7 +266,7 @@ foreach ($m in $mergedBhvaContacts) {
 }
 
 # =========================
-# 6. Apply to BHV mailboxes (BHVA-only mirrors)
+# 6. Apply to BHV mailboxes
 # =========================
 
 function Sync-ToBhv {
@@ -298,7 +288,6 @@ function Sync-ToBhv {
         }
     }
 
-    # Add/update BHVA contacts
     foreach ($m in $MergedBhva) {
         $emails = @()
         if ($m.emailAddresses) {
@@ -335,7 +324,6 @@ function Sync-ToBhv {
         }
     }
 
-    # Delete non-BHVA contacts (BHVA-only rule)
     foreach ($c in $ExistingContacts) {
         $emails = @()
         if ($c.emailAddresses) {
