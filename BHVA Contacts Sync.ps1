@@ -20,18 +20,21 @@ $BhvaCategory    = "BHVA"
 # Connect to Graph
 # =========================
 
+# Ensure module is installed on Ubuntu runners
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
+    Install-Module Microsoft.Graph -Force -Scope CurrentUser
+}
+
 Import-Module Microsoft.Graph -Force
 
 $SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
 
-# Correct Kiota credential object
-$Cred = New-Object Microsoft.Graph.PowerShell.Models.MicrosoftGraphClientSecretCredential(
-    $TenantId,
-    $ClientId,
-    $SecureSecret
-)
+# Correct Kiota credential object (works on Windows + Ubuntu)
+$Cred = New-MgClientSecretCredential `
+    -TenantId $TenantId `
+    -ClientId $ClientId `
+    -ClientSecret $SecureSecret
 
-# Correct authentication call
 Connect-MgGraph -ClientSecretCredential $Cred -Scopes "Contacts.ReadWrite", "User.Read.All"
 
 # =========================
@@ -369,4 +372,3 @@ $changes | Export-Csv -Path $logPath -NoTypeInformation
 Write-Host "Sync complete. Changes logged to $logPath"
 if ($DryRun) {
     Write-Host "Dry run mode: no changes were written."
-}
