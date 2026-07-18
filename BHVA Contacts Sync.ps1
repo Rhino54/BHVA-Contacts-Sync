@@ -27,15 +27,11 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph)) {
 
 Import-Module Microsoft.Graph -Force
 
-$SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
-
-# Correct Kiota credential object (works on Windows + Ubuntu)
-$Cred = New-MgClientSecretCredential `
+Connect-MgGraph `
     -TenantId $TenantId `
     -ClientId $ClientId `
-    -ClientSecret $SecureSecret
-
-Connect-MgGraph -ClientSecretCredential $Cred -Scopes "Contacts.ReadWrite", "User.Read.All"
+    -ClientSecret $ClientSecret `
+    -Scopes "Contacts.ReadWrite", "User.Read.All"
 
 # =========================
 # Helpers
