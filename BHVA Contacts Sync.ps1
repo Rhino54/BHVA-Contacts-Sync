@@ -10,14 +10,16 @@ $TenantId        = $env:GRAPH_TENANT_ID
 $ClientId        = $env:GRAPH_CLIENT_ID
 $ClientSecret    = $env:GRAPH_CLIENT_SECRET
 
-$HotmailUser     = "hotpie1@hotmail.com"
+$HotmailUser     = $env:HOTMAIL_IMAP_USERNAME
+$HotmailPassword = $env:HOTMAIL_IMAP_PASSWORD
+
 $BhvUser1        = "scortese@bristolharbourvillage.org"
 $BhvUser2        = "bod.bhva@bristolharbourvillage.org"
 
 $BhvaCategory    = "BHVA"
 
 # =========================
-# REST auth – get app-only token
+# REST auth – app-only token for BHV
 # =========================
 
 function Get-GraphToken {
@@ -40,6 +42,134 @@ function Get-GraphToken {
 
 $AccessToken = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSecret $ClientSecret
 $AuthHeader  = @{ Authorization = "Bearer $AccessToken" }
+
+# =========================
+# IMAP helpers – Hotmail Contacts
+# =========================
+
+function Connect-ImapHotmail {
+    param(
+        [string]$Username,
+        [string]$Password
+    )
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    $client.Connect("imap-mail.outlook.com", 993)
+    $sslStream = New-Object System.Net.Security.SslStream($client.GetStream(), $false)
+    $sslStream.AuthenticateAsClient("imap-mail.outlook.com")
+
+    $reader = New-Object System.IO.StreamReader($sslStream)
+    $writer = New-Object System.IO.StreamWriter($sslStream)
+    $writer.AutoFlush = $true
+
+    # Read server greeting
+    $null = $reader.ReadLine()
+
+    # LOGIN
+    $writer.WriteLine("a1 LOGIN $Username $Password")
+    $null = $reader.ReadLine()
+
+    # SELECT Contacts folder
+    $writer.WriteLine('a2 SELECT "Contacts"')
+    while ($true) {
+        $line = $reader.ReadLine()
+        if ($line -match '^a2 ') { break }
+    }
+
+    return [pscustomobject]@{
+        Client = $client
+        Stream = $sslStream
+        Reader = $reader
+        Writer = $writer
+    }
+}
+
+function Get-HotmailContactsViaIMAP {
+    param(
+        [string]$Username,
+        [string]$Password
+    )
+
+    $session = Connect-ImapHotmail -Username $Username -Password $Password
+    $reader  = $session.Reader
+    $writer  = $session.Writer
+
+    $contacts = @()
+
+    # FETCH all messages in Contacts as vCards
+    $writer.WriteLine("a3 FETCH 1:* BODY[]")
+    while ($true) {
+        $line = $reader.ReadLine()
+        if (-not $line) { break }
+        if ($line -match '^a3 ') { break }
+
+        if ($line -match '^\* \d+ FETCH') {
+            # Next lines until a line with only ")" contain the vCard
+            $vcard = New-Object System.Text.StringBuilder
+            while ($true) {
+                $bodyLine = $reader.ReadLine()
+                if ($bodyLine -eq ")") { break }
+                [void]$vcard.AppendLine($bodyLine)
+            }
+
+            $vc = $vcard.ToString()
+            if ($vc -match 'BEGIN:VCARD') {
+                $contacts += (Convert-VCardToContactObject -VCard $vc)
+            }
+        }
+    }
+
+    # LOGOUT
+    $writer.WriteLine("a4 LOGOUT")
+    $null = $reader.ReadLine()
+
+    $session.Stream.Dispose()
+    $session.Client.Close()
+
+    return $contacts
+}
+
+function Convert-VCardToContactObject {
+    param(
+        [string]$VCard
+    )
+
+    $lines = $VCard -split "`r?`n"
+
+    $displayName = $null
+    $emails      = @()
+    $phones      = @()
+    $notes       = $null
+    $categories  = @()
+
+    foreach ($line in $lines) {
+        if ($line -like "FN:*") {
+            $displayName = $line.Substring(3)
+        } elseif ($line -like "EMAIL*:*") {
+            $emails += $line.Split(":")[1]
+        } elseif ($line -like "TEL*:*") {
+            $phones += $line.Split(":")[1]
+        } elseif ($line -like "NOTE:*") {
+            $notes = $line.Substring(5)
+        } elseif ($line -like "CATEGORIES:*") {
+            $categories = $line.Substring(11).Split(",")
+        }
+    }
+
+    return [pscustomobject]@{
+        id             = $null
+        displayName    = $displayName
+        emailAddresses = $emails | ForEach-Object { @{ address = $_ } }
+        mobilePhone    = $phones.Count -gt 0 ? $phones[0] : $null
+        businessPhones = $phones.Count -gt 1 ? $phones[1..($phones.Count-1)] : @()
+        homePhones     = @()
+        personalNotes  = $notes
+        categories     = $categories
+        parentFolderId = "HotmailContacts"
+    }
+}
+
+# (For brevity, write/update/delete via IMAP are omitted here; you can keep Hotmail as read-only SPOT or extend similarly.)
 
 # =========================
 # Helpers
@@ -101,7 +231,7 @@ function Get-ContactsForUser {
 # 1. Read contacts
 # =========================
 
-$hotmailContacts = Get-ContactsForUser -UserId $HotmailUser
+$hotmailContacts = Get-HotmailContactsViaIMAP -Username $HotmailUser -Password $HotmailPassword
 $bhv1Contacts    = Get-ContactsForUser -UserId $BhvUser1
 $bhv2Contacts    = Get-ContactsForUser -UserId $BhvUser2
 
@@ -150,7 +280,7 @@ foreach ($c in $sourceContacts) {
 function Merge-Contacts {
     param([object[]]$Contacts)
 
-    $hotmail = $Contacts | Where-Object { $_.parentFolderId -like "*$HotmailUser*" }
+    $hotmail = $Contacts | Where-Object { $_.parentFolderId -eq "HotmailContacts" }
     if ($hotmail.Count -gt 0) {
         $base = $hotmail[0]
     } else {
@@ -161,7 +291,6 @@ function Merge-Contacts {
         } -Descending | Select-Object -First 1
     }
 
-    # Start with a shallow copy
     $merged = [ordered]@{
         id             = $base.id
         displayName    = $base.displayName
@@ -171,11 +300,10 @@ function Merge-Contacts {
         businessPhones = $base.businessPhones
         homePhones     = $base.homePhones
         categories     = $base.categories
-        body           = $base.body
+        personalNotes  = $base.personalNotes
         emailAddresses = $base.emailAddresses
     }
 
-    # Emails
     $allEmails = @()
     foreach ($c in $Contacts) {
         if ($c.emailAddresses) {
@@ -187,7 +315,6 @@ function Merge-Contacts {
         @{ address = $_ }
     }
 
-    # Phones
     $allPhones = @()
     foreach ($c in $Contacts) {
         if ($c.mobilePhone)      { $allPhones += $c.mobilePhone }
@@ -210,18 +337,14 @@ function Merge-Contacts {
         }
     }
 
-    # Notes summary (not full text)
-    $allBodies = $Contacts | Where-Object { $_.body -and $_.body.content } |
-        ForEach-Object { $_.body.content }
-
-    if ($allBodies.Count -gt 0) {
-        $merged.body = @{
-            contentType = "Text"
-            content     = "Merged notes from $($allBodies.Count) source contact(s)."
-        }
+    $allNotes = @()
+    foreach ($c in $Contacts) {
+        if ($c.personalNotes) { $allNotes += $c.personalNotes }
+    }
+    if ($allNotes.Count -gt 0) {
+        $merged.personalNotes = "Merged notes from $($allNotes.Count) source contact(s)."
     }
 
-    # Categories
     $cats = @()
     foreach ($c in $Contacts) {
         if ($c.categories) { $cats += $c.categories }
@@ -229,7 +352,6 @@ function Merge-Contacts {
     $cats += $BhvaCategory
     $merged.categories = $cats | Select-Object -Unique
 
-    # Source summary for logging
     $merged.SourceSummary = @{
         Count     = $Contacts.Count
         Mailboxes = ($Contacts | ForEach-Object { $_.parentFolderId }) -join ";"
@@ -245,7 +367,7 @@ foreach ($entry in $unifiedBhva.GetEnumerator()) {
 }
 
 # =========================
-# REST helpers for write operations
+# REST helpers for BHV write operations
 # =========================
 
 function New-GraphContact {
@@ -282,72 +404,12 @@ function Remove-GraphContact {
 }
 
 # =========================
-# 5. Apply to Hotmail
+# 5. Apply to Hotmail (currently read-only SPOT)
 # =========================
-
-$hotmailIndex = @{}
-foreach ($c in $hotmailContacts) {
-    $emails = @()
-    if ($c.emailAddresses) {
-        $emails = $c.emailAddresses | ForEach-Object { $_.address }
-    }
-    $key = Build-MatchKey -DisplayName $c.displayName -Emails $emails
-    if (-not $hotmailIndex.ContainsKey($key)) {
-        $hotmailIndex[$key] = $c
-    }
-}
 
 $changes = @()
 
-foreach ($m in $mergedBhvaContacts) {
-    $emails = @()
-    if ($m.emailAddresses) {
-        $emails = $m.emailAddresses | ForEach-Object { $_.address }
-    }
-    $key = Build-MatchKey -DisplayName $m.displayName -Emails $emails
-
-    $phones = @()
-    if ($m.mobilePhone)      { $phones += $m.mobilePhone }
-    if ($m.businessPhones)   { $phones += $m.businessPhones }
-
-    if ($hotmailIndex.ContainsKey($key)) {
-        $existing = $hotmailIndex[$key]
-
-        $changes += [ordered]@{
-            Action        = "UpdateHotmail"
-            Mailbox       = $HotmailUser
-            Key           = $key
-            Name          = $m.displayName
-            Emails        = ($emails -join ", ")
-            Phones        = ($phones -join ", ")
-            Categories    = ($m.categories -join ", ")
-            NotesSummary  = $m.body.content
-            SourceCount   = $m.SourceSummary.Count
-            SourceMailboxes = $m.SourceSummary.Mailboxes
-        }
-
-        if (-not $DryRun) {
-            Update-GraphContact -UserId $HotmailUser -ContactId $existing.id -Contact $m
-        }
-    } else {
-        $changes += [ordered]@{
-            Action        = "CreateHotmail"
-            Mailbox       = $HotmailUser
-            Key           = $key
-            Name          = $m.displayName
-            Emails        = ($emails -join ", ")
-            Phones        = ($phones -join ", ")
-            Categories    = ($m.categories -join ", ")
-            NotesSummary  = $m.body.content
-            SourceCount   = $m.SourceSummary.Count
-            SourceMailboxes = $m.SourceSummary.Mailboxes
-        }
-
-        if (-not $DryRun) {
-            New-GraphContact -UserId $HotmailUser -Contact $m
-        }
-    }
-}
+# (If you want write-back to Hotmail via IMAP, this is where New/Update/Delete vCard calls would go.)
 
 # =========================
 # 6. Apply to BHV mailboxes
@@ -387,37 +449,59 @@ function Sync-ToBhv {
             $existing = $index[$key]
 
             $changes += [ordered]@{
-                Action        = "UpdateBhv"
-                Mailbox       = $UserId
-                Key           = $key
-                Name          = $m.displayName
-                Emails        = ($emails -join ", ")
-                Phones        = ($phones -join ", ")
-                Categories    = ($m.categories -join ", ")
-                NotesSummary  = $m.body.content
-                SourceCount   = $m.SourceSummary.Count
+                Action          = "UpdateBhv"
+                Mailbox         = $UserId
+                Key             = $key
+                Name            = $m.displayName
+                Emails          = ($emails -join ", ")
+                Phones          = ($phones -join ", ")
+                Categories      = ($m.categories -join ", ")
+                NotesSummary    = $m.personalNotes
+                SourceCount     = $m.SourceSummary.Count
                 SourceMailboxes = $m.SourceSummary.Mailboxes
             }
 
             if (-not $DryRun) {
-                Update-GraphContact -UserId $UserId -ContactId $existing.id -Contact $m
+                $payload = @{
+                    displayName    = $m.displayName
+                    companyName    = $m.companyName
+                    jobTitle       = $m.jobTitle
+                    mobilePhone    = $m.mobilePhone
+                    businessPhones = $m.businessPhones
+                    homePhones     = $m.homePhones
+                    categories     = $m.categories
+                    personalNotes  = $m.personalNotes
+                    emailAddresses = $m.emailAddresses
+                }
+                Update-GraphContact -UserId $UserId -ContactId $existing.id -Contact $payload
             }
         } else {
             $changes += [ordered]@{
-                Action        = "CreateBhv"
-                Mailbox       = $UserId
-                Key           = $key
-                Name          = $m.displayName
-                Emails        = ($emails -join ", ")
-                Phones        = ($phones -join ", ")
-                Categories    = ($m.categories -join ", ")
-                NotesSummary  = $m.body.content
-                SourceCount   = $m.SourceSummary.Count
+                Action          = "CreateBhv"
+                Mailbox         = $UserId
+                Key             = $key
+                Name            = $m.displayName
+                Emails          = ($emails -join ", ")
+                Phones          = ($phones -join ", ")
+                Categories      = ($m.categories -join ", ")
+                NotesSummary    = $m.personalNotes
+                SourceCount     = $m.SourceSummary.Count
                 SourceMailboxes = $m.SourceSummary.Mailboxes
             }
 
             if (-not $DryRun) {
-                New-GraphContact -UserId $UserId -Contact $m
+                $payload = @{
+                    displayName    = $m.displayName
+                    companyName    = $m.companyName
+                    jobTitle       = $m.jobTitle
+                    mobilePhone    = $m.mobilePhone
+                    businessPhones = $m.businessPhones
+                    homePhones     = $m.homePhones
+                    categories     = $m.categories
+                    personalNotes  = $m.personalNotes
+                    emailAddresses = $m.emailAddresses
+                }
+                New-GraphContact -UserId $UserId -Contact $payload
             }
         }
     }
@@ -439,15 +523,15 @@ function Sync-ToBhv {
 
         if (-not $existsInUnified) {
             $changes += [ordered]@{
-                Action        = "DeleteBhv"
-                Mailbox       = $UserId
-                Key           = $key
-                Name          = $c.displayName
-                Emails        = ($emails -join ", ")
-                Phones        = ($c.mobilePhone, ($c.businessPhones -join ";")) -join ", "
-                Categories    = ($c.categories -join ", ")
-                NotesSummary  = $c.body.content
-                SourceCount   = 1
+                Action          = "DeleteBhv"
+                Mailbox         = $UserId
+                Key             = $key
+                Name            = $c.displayName
+                Emails          = ($emails -join ", ")
+                Phones          = ($c.mobilePhone, ($c.businessPhones -join ";")) -join ", "
+                Categories      = ($c.categories -join ", ")
+                NotesSummary    = $c.personalNotes
+                SourceCount     = 1
                 SourceMailboxes = $c.parentFolderId
             }
 
@@ -468,7 +552,11 @@ Sync-ToBhv -UserId $BhvUser2 -MergedBhva $mergedBhvaContacts -ExistingContacts $
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $logPath   = "sync-log-$timestamp.csv"
 
-$changes | Export-Csv -Path $logPath -NoTypeInformation
+if ($changes -and $changes.Count -gt 0) {
+    $changes | Export-Csv -Path $logPath -NoTypeInformation
+} else {
+    "" | Export-Csv -Path $logPath -NoTypeInformation
+}
 
 Write-Host "Sync complete. Changes logged to $logPath"
 if ($DryRun) {
