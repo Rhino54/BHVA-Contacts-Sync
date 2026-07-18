@@ -5,26 +5,43 @@ on:
 
 jobs:
   run-sync:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    # ============================
+    # Cache Microsoft Graph module
+    # ============================
     - name: Cache Microsoft Graph module
       uses: actions/cache@v4
       with:
-        path: C:\Users\runneradmin\AppData\Local\PackageManagement\NuGet\Packages
+        path: |
+          ~/.local/share/powershell/Modules
+          ~/.local/share/PackageManagement/NuGet/Packages
         key: graph-cache
 
+    # ============================
+    # Install Microsoft Graph (only if cache is empty)
+    # ============================
     - name: Install Microsoft Graph (NuGet fallback)
       shell: pwsh
       run: |
-        if (-not (Test-Path "C:\Users\runneradmin\AppData\Local\PackageManagement\NuGet\Packages\Microsoft.Graph")) {
+        # Create directories if missing
+        mkdir -p ~/.local/share/powershell/Modules
+        mkdir -p ~/.local/share/PackageManagement/NuGet/Packages
+
+        # Check if Graph is already cached
+        if (-not (Test-Path "~/.local/share/PackageManagement/NuGet/Packages/Microsoft.Graph")) {
             Install-Package -Name Microsoft.Graph -ProviderName NuGet -Scope CurrentUser -Force
         }
+
         Import-Module Microsoft.Graph -Force
 
+    # ============================
+    # Run your sync script
+    # ============================
     - name: Run BHVA Contacts Sync script
       shell: pwsh
       run: pwsh "./BHVA Contacts Sync.ps1"
