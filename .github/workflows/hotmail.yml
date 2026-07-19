@@ -1,0 +1,24 @@
+name: Hotmail Automation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Playwright
+      run: |
+        pwsh -c "Install-Module -Name Microsoft.Playwright -Force"
+        pwsh -c "playwright install"
+
+    - name: Run Hotmail Login
+      env:
+        HOTMAIL_USERNAME: ${{ secrets.HOTMAIL_USERNAME }}
+        HOTMAIL_PASSWORD: ${{ secrets.HOTMAIL_PASSWORD }}
+        HOTMAIL_TOTP_SECRET: ${{ secrets.HOTMAIL_TOTP_SECRET }}
+      run: pwsh ./hotmail-login.ps1
