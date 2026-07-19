@@ -44,7 +44,7 @@ $AccessToken = Get-GraphToken -TenantId $TenantId -ClientId $ClientId -ClientSec
 $AuthHeader  = @{ Authorization = "Bearer $AccessToken" }
 
 # =========================
-# IMAP helpers – Hotmail Contacts
+# IMAP helpers – Hotmail Contacts (fail-fast, F2-Loose, C1)
 # =========================
 
 function Connect-ImapHotmail {
@@ -113,6 +113,106 @@ function Connect-ImapHotmail {
     }
 }
 
+function Convert-VCardToContactObject {
+    param(
+        [string]$VCard
+    )
+
+    $lines = $VCard -split "`r?`n"
+
+    $displayName = $null
+    $emails      = @()
+    $phones      = @()
+    $notes       = $null
+    $categories  = @()
+
+    foreach ($line in $lines) {
+        if ($line -like "FN:*") {
+            $displayName = $line.Substring(3)
+        } elseif ($line -like "EMAIL*:*") {
+            $emails += $line.Split(":")[1]
+        } elseif ($line -like "TEL*:*") {
+            $phones += $line.Split(":")[1]
+        } elseif ($line -like "NOTE:*") {
+            $notes = $line.Substring(5)
+        } elseif ($line -like "CATEGORIES:*") {
+            $rawCats = $line.Substring(11)
+            # split on comma or semicolon
+            $categories = $rawCats -split "[,;]" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        }
+    }
+
+    return [pscustomobject]@{
+        id             = $null
+        displayName    = $displayName
+        emailAddresses = $emails | Where-Object { $_ } | ForEach-Object { @{ address = $_ } }
+        mobilePhone    = $phones.Count -gt 0 ? $phones[0] : $null
+        businessPhones = $phones.Count -gt 1 ? $phones[1..($phones.Count-1)] : @()
+        homePhones     = @()
+        personalNotes  = $notes
+        categories     = $categories
+        parentFolderId = "HotmailContacts"
+    }
+}
+
+function Get-HotmailContactsViaIMAP {
+    param(
+        [string]$Username,
+        [string]$Password
+    )
+
+    $session = Connect-ImapHotmail -Username $Username -Password $Password
+    $reader  = $session.Reader
+    $writer  = $session.Writer
+
+    $contacts = @()
+
+    # FETCH all messages in Contacts as vCards
+    $writer.WriteLine("a3 FETCH 1:* BODY[]")
+    while ($true) {
+        $line = $reader.ReadLine()
+        if (-not $line) { break }
+        if ($line -match '^a3 ') { break }
+
+        if ($line -match '^\* \d+ FETCH') {
+            # Next lines until a line with only ")" contain the vCard
+            $vcard = New-Object System.Text.StringBuilder
+            while ($true) {
+                $bodyLine = $reader.ReadLine()
+                if ($bodyLine -eq ")") { break }
+                [void]$vcard.AppendLine($bodyLine)
+            }
+
+            $vc = $vcard.ToString()
+            if ($vc -match 'BEGIN:VCARD') {
+                $contact = Convert-VCardToContactObject -VCard $vc
+
+                # F2-Loose + C1: include any vCard whose categories contain "BHVA" (case-insensitive)
+                $hasBhva = $false
+                foreach ($cat in $contact.categories) {
+                    if ($cat -and ($cat.ToLower().Contains("bhva"))) {
+                        $hasBhva = $true
+                        break
+                    }
+                }
+
+                if ($hasBhva) {
+                    $contacts += $contact
+                }
+            }
+        }
+    }
+
+    # LOGOUT
+    $writer.WriteLine("a4 LOGOUT")
+    $null = $reader.ReadLine()
+
+    $session.Stream.Dispose()
+    $session.Client.Close()
+
+    return $contacts
+}
+
 # =========================
 # Helpers
 # =========================
@@ -178,11 +278,11 @@ $bhv1Contacts    = Get-ContactsForUser -UserId $BhvUser1
 $bhv2Contacts    = Get-ContactsForUser -UserId $BhvUser2
 
 # =========================
-# 2. Filter BHVA from Hotmail
+# 2. Filter BHVA from Hotmail (already filtered by IMAP, but keep for safety)
 # =========================
 
 $hotmailBhva = $hotmailContacts | Where-Object {
-    $_.categories -contains $BhvaCategory
+    $_.categories -and ($_.categories | Where-Object { $_.ToLower().Contains("bhva") })
 }
 
 # =========================
@@ -292,7 +392,7 @@ function Merge-Contacts {
         if ($c.categories) { $cats += $c.categories }
     }
     $cats += $BhvaCategory
-    $merged.categories = $cats | Select-Object -Unique
+    $merged.categories = $cats | Where-Object { $_ } | Select-Object -Unique
 
     $merged.SourceSummary = @{
         Count     = $Contacts.Count
@@ -346,16 +446,55 @@ function Remove-GraphContact {
 }
 
 # =========================
-# 5. Apply to Hotmail (currently read-only SPOT)
+# 5. Apply to Hotmail (read-only SPOT)
 # =========================
 
 $changes = @()
 
-# (If you want write-back to Hotmail via IMAP, this is where New/Update/Delete vCard calls would go.)
-
 # =========================
 # 6. Apply to BHV mailboxes
 # =========================
+
+function Build-GraphPayloadFromMerged {
+    param(
+        [object]$m
+    )
+
+    # Ensure arrays are valid for Graph
+    $emails = @()
+    if ($m.emailAddresses) {
+        $emails = $m.emailAddresses |
+            Where-Object { $_.address } |
+            ForEach-Object { @{ address = $_.address } }
+    }
+
+    $businessPhones = @()
+    if ($m.businessPhones) {
+        $businessPhones = $m.businessPhones | Where-Object { $_ }
+    }
+
+    $homePhones = @()
+    if ($m.homePhones) {
+        $homePhones = $m.homePhones | Where-Object { $_ }
+    }
+
+    $categories = @()
+    if ($m.categories) {
+        $categories = $m.categories | Where-Object { $_ }
+    }
+
+    return @{
+        displayName    = $m.displayName
+        companyName    = $m.companyName
+        jobTitle       = $m.jobTitle
+        mobilePhone    = $m.mobilePhone
+        businessPhones = $businessPhones
+        homePhones     = $homePhones
+        categories     = $categories
+        personalNotes  = $m.personalNotes
+        emailAddresses = $emails
+    }
+}
 
 function Sync-ToBhv {
     param(
@@ -390,7 +529,7 @@ function Sync-ToBhv {
         if ($index.ContainsKey($key)) {
             $existing = $index[$key]
 
-            $changes += [ordered]@{
+            $changes += [pscustomobject]@{
                 Action          = "UpdateBhv"
                 Mailbox         = $UserId
                 Key             = $key
@@ -404,21 +543,11 @@ function Sync-ToBhv {
             }
 
             if (-not $DryRun) {
-                $payload = @{
-                    displayName    = $m.displayName
-                    companyName    = $m.companyName
-                    jobTitle       = $m.jobTitle
-                    mobilePhone    = $m.mobilePhone
-                    businessPhones = $m.businessPhones
-                    homePhones     = $m.homePhones
-                    categories     = $m.categories
-                    personalNotes  = $m.personalNotes
-                    emailAddresses = $m.emailAddresses
-                }
+                $payload = Build-GraphPayloadFromMerged -m $m
                 Update-GraphContact -UserId $UserId -ContactId $existing.id -Contact $payload
             }
         } else {
-            $changes += [ordered]@{
+            $changes += [pscustomobject]@{
                 Action          = "CreateBhv"
                 Mailbox         = $UserId
                 Key             = $key
@@ -432,17 +561,7 @@ function Sync-ToBhv {
             }
 
             if (-not $DryRun) {
-                $payload = @{
-                    displayName    = $m.displayName
-                    companyName    = $m.companyName
-                    jobTitle       = $m.jobTitle
-                    mobilePhone    = $m.mobilePhone
-                    businessPhones = $m.businessPhones
-                    homePhones     = $m.homePhones
-                    categories     = $m.categories
-                    personalNotes  = $m.personalNotes
-                    emailAddresses = $m.emailAddresses
-                }
+                $payload = Build-GraphPayloadFromMerged -m $m
                 New-GraphContact -UserId $UserId -Contact $payload
             }
         }
@@ -464,7 +583,7 @@ function Sync-ToBhv {
         }
 
         if (-not $existsInUnified) {
-            $changes += [ordered]@{
+            $changes += [pscustomobject]@{
                 Action          = "DeleteBhv"
                 Mailbox         = $UserId
                 Key             = $key
