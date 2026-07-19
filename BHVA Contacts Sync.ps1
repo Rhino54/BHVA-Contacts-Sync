@@ -53,123 +53,65 @@ function Connect-ImapHotmail {
         [string]$Password
     )
 
-    $client = New-Object System.Net.Sockets.TcpClient
-    $client.Connect("imap-mail.outlook.com", 993)
-    $sslStream = New-Object System.Net.Security.SslStream($client.GetStream(), $false)
-    $sslStream.AuthenticateAsClient("imap-mail.outlook.com")
+    try {
+        # TCP connect
+        $client = New-Object System.Net.Sockets.TcpClient
+        $client.Connect("imap-mail.outlook.com", 993)
 
-    $reader = New-Object System.IO.StreamReader($sslStream)
-    $writer = New-Object System.IO.StreamWriter($sslStream)
-    $writer.AutoFlush = $true
+        # SSL stream with forced TLS 1.2
+        $sslStream = New-Object System.Net.Security.SslStream(
+            $client.GetStream(),
+            $false,
+            { param($sender,$cert,$chain,$errors) return $true }
+        )
 
-    # Read server greeting
-    $null = $reader.ReadLine()
+        $sslStream.AuthenticateAsClient(
+            "imap-mail.outlook.com",
+            $null,
+            [System.Security.Authentication.SslProtocols]::Tls12,
+            $false
+        )
 
-    # LOGIN
-    $writer.WriteLine("a1 LOGIN $Username $Password")
-    $null = $reader.ReadLine()
+        $reader = New-Object System.IO.StreamReader($sslStream)
+        $writer = New-Object System.IO.StreamWriter($sslStream)
+        $writer.AutoFlush = $true
 
-    # SELECT Contacts folder
-    $writer.WriteLine('a2 SELECT "Contacts"')
-    while ($true) {
-        $line = $reader.ReadLine()
-        if ($line -match '^a2 ') { break }
-    }
+        # Server greeting
+        $greet = $reader.ReadLine()
+        if (-not $greet) {
+            throw "IMAP server did not send a greeting."
+        }
 
-    return [pscustomobject]@{
-        Client = $client
-        Stream = $sslStream
-        Reader = $reader
-        Writer = $writer
-    }
-}
+        # LOGIN
+        $writer.WriteLine("a1 LOGIN $Username $Password")
+        $loginResp = $reader.ReadLine()
 
-function Get-HotmailContactsViaIMAP {
-    param(
-        [string]$Username,
-        [string]$Password
-    )
+        if ($loginResp -notmatch "a1 OK") {
+            throw "IMAP LOGIN failed: $loginResp"
+        }
 
-    $session = Connect-ImapHotmail -Username $Username -Password $Password
-    $reader  = $session.Reader
-    $writer  = $session.Writer
-
-    $contacts = @()
-
-    # FETCH all messages in Contacts as vCards
-    $writer.WriteLine("a3 FETCH 1:* BODY[]")
-    while ($true) {
-        $line = $reader.ReadLine()
-        if (-not $line) { break }
-        if ($line -match '^a3 ') { break }
-
-        if ($line -match '^\* \d+ FETCH') {
-            # Next lines until a line with only ")" contain the vCard
-            $vcard = New-Object System.Text.StringBuilder
-            while ($true) {
-                $bodyLine = $reader.ReadLine()
-                if ($bodyLine -eq ")") { break }
-                [void]$vcard.AppendLine($bodyLine)
-            }
-
-            $vc = $vcard.ToString()
-            if ($vc -match 'BEGIN:VCARD') {
-                $contacts += (Convert-VCardToContactObject -VCard $vc)
+        # SELECT Contacts folder
+        $writer.WriteLine('a2 SELECT "Contacts"')
+        while ($true) {
+            $line = $reader.ReadLine()
+            if (-not $line) { throw "IMAP SELECT failed: no response." }
+            if ($line -match '^a2 OK') { break }
+            if ($line -match '^a2 NO' -or $line -match '^a2 BAD') {
+                throw "IMAP SELECT Contacts failed: $line"
             }
         }
-    }
 
-    # LOGOUT
-    $writer.WriteLine("a4 LOGOUT")
-    $null = $reader.ReadLine()
-
-    $session.Stream.Dispose()
-    $session.Client.Close()
-
-    return $contacts
-}
-
-function Convert-VCardToContactObject {
-    param(
-        [string]$VCard
-    )
-
-    $lines = $VCard -split "`r?`n"
-
-    $displayName = $null
-    $emails      = @()
-    $phones      = @()
-    $notes       = $null
-    $categories  = @()
-
-    foreach ($line in $lines) {
-        if ($line -like "FN:*") {
-            $displayName = $line.Substring(3)
-        } elseif ($line -like "EMAIL*:*") {
-            $emails += $line.Split(":")[1]
-        } elseif ($line -like "TEL*:*") {
-            $phones += $line.Split(":")[1]
-        } elseif ($line -like "NOTE:*") {
-            $notes = $line.Substring(5)
-        } elseif ($line -like "CATEGORIES:*") {
-            $categories = $line.Substring(11).Split(",")
+        return [pscustomobject]@{
+            Client = $client
+            Stream = $sslStream
+            Reader = $reader
+            Writer = $writer
         }
     }
-
-    return [pscustomobject]@{
-        id             = $null
-        displayName    = $displayName
-        emailAddresses = $emails | ForEach-Object { @{ address = $_ } }
-        mobilePhone    = $phones.Count -gt 0 ? $phones[0] : $null
-        businessPhones = $phones.Count -gt 1 ? $phones[1..($phones.Count-1)] : @()
-        homePhones     = @()
-        personalNotes  = $notes
-        categories     = $categories
-        parentFolderId = "HotmailContacts"
+    catch {
+        throw "IMAP connection failed: $($_.Exception.Message)"
     }
 }
-
-# (For brevity, write/update/delete via IMAP are omitted here; you can keep Hotmail as read-only SPOT or extend similarly.)
 
 # =========================
 # Helpers
