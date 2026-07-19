@@ -5,23 +5,14 @@ on:
 
 jobs:
   run-sync:
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
     # ============================
-    # Cache Microsoft Graph PowerShell module
-    # ============================
-    - name: Cache Microsoft Graph module
-      uses: actions/cache@v4
-      with:
-        path: /home/runner/.local/share/powershell/Modules
-        key: graph-cache
-
-    # ============================
-    # Install Microsoft Graph PowerShell module (fast)
+    # Install Microsoft Graph PowerShell module
     # ============================
     - name: Install Microsoft Graph PowerShell module
       shell: pwsh
@@ -40,3 +31,5 @@ jobs:
         GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
         GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
         GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+        HOTMAIL_IMAP_USERNAME: ${{ secrets.HOTMAIL_IMAP_USERNAME }}
+        HOTMAIL_IMAP_PASSWORD: ${{ secrets.HOTMAIL_IMAP_PASSWORD }}
